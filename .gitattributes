@@ -1,0 +1,6 @@
+# Normalize to LF in the repository regardless of the contributor's platform.
+# A Dockerfile or shell-invoked file checked in with CRLF fails inside a Linux
+# container in ways that are hard to trace back to line endings.
+* text=auto eol=lf
+*.png binary
+*.jpg binary

@@ -1,0 +1,92 @@
+# Self-contained manifest for inspecting the agent on a throwaway cluster.
+#
+# This is NOT how the agent is normally deployed -- Struct8 generates the
+# manifest and delivers it through your GitOps flow. It is reproduced here,
+# by hand and in full, so the RBAC and the container spec can be read and
+# applied without involving Struct8 at all.
+#
+# The ClusterRole below is the real one. Compare it against what the generated
+# manifest gives you; they grant the same thing.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: struct8-agent-sa
+  namespace: struct8-agent-test
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: struct8-agent-read
+rules:
+  # No create/update/patch/delete anywhere in this file. The agent cannot
+  # change cluster state, and no rule below mentions secrets or configmaps.
+  - apiGroups: [""]
+    resources: ["pods", "services", "endpoints", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: struct8-agent-read
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: struct8-agent-read
+subjects:
+  - kind: ServiceAccount
+    name: struct8-agent-sa
+    namespace: struct8-agent-test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: struct8-agent
+  namespace: struct8-agent-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: struct8-agent
+  template:
+    metadata:
+      labels:
+        app: struct8-agent
+    spec:
+      serviceAccountName: struct8-agent-sa
+      containers:
+        - name: agent
+          image: k8s-agent:dev
+          # :dev rather than :latest so the kubelet keeps IfNotPresent and uses
+          # the image loaded by `kind load`, instead of trying a registry pull.
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: CLUSTER_ID
+              value: local-test
+            - name: CLUSTER_API_KEY
+              value: local-test-key
+            # Where the metrics go. host.docker.internal is the machine running
+            # kind, as seen from inside the cluster (Docker Desktop). On Linux,
+            # use the host IP on the docker0 bridge instead.
+            - name: WORKER_BASE_URL
+              value: http://host.docker.internal:8099
+            - name: PUSH_INTERVAL_SECONDS
+              value: "10"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      # No cloudflared container here: with no tunnel token there is no inbound
+      # path into this Pod at all. The status server binds to loopback, and this
+      # walkthrough reaches it with kubectl port-forward instead.

@@ -1,0 +1,99 @@
+# Builds and publishes the agent image to ghcr.io/struct8/k8s-agent.
+#
+# Uses the automatic GITHUB_TOKEN (see the packages:write scope below) -- no
+# credential has to be registered on the repository for this to work.
+#
+# One manual step exists and only once: the first publish creates the GHCR
+# package as private. It has to be switched to Public under Package settings,
+# otherwise a customer's kubelet cannot pull the image.
+
+name: Publish agent image
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  # Gate before publishing. owners_test.go covers owner resolution through
+  # ownerReferences, which is what makes a metric key match what the chart
+  # asks for. When that breaks, the API answers HTTP 200 with an empty series
+  # and nothing anywhere reports an error -- so an untested image can be
+  # silently useless.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - run: go vet ./...
+      - run: go test ./...
+
+  build-and-push:
+    needs: test
+    runs-on: ubuntu-latest
+    # A pull request from a fork cannot be given package-write access, and
+    # publishing from an unreviewed branch would defeat the gate above.
+    if: github.event_name != 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # QEMU covers the architecture the runner cannot execute natively. The
+      # Dockerfile cross-compiles (its build stage is pinned to $BUILDPLATFORM),
+      # so emulation applies to image assembly, not to the compiler.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Tagging rule, and why `latest` never comes from a branch commit:
+      #   push to main -> `edge` and `main-<sha>`
+      #   tag vX.Y.Z   -> `X.Y.Z`, `X.Y`, `X` and `latest`
+      #
+      # `latest` meaning "newest build of main" is how a node ends up serving a
+      # cached layer under imagePullPolicy: IfNotPresent, which presents as a
+      # deployment that did not sync rather than as an old image. Here `latest`
+      # moves only on a deliberate release.
+      - name: Derive tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/k8s-agent
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=sha,prefix={{branch}}-
+          flavor: |
+            latest=auto
+
+      # linux/arm64 is not optional: a customer on Graviton, Ampere, or any ARM
+      # node gets `exec format error` from an amd64-only image -- an opaque
+      # failure, and one that surfaces on their side rather than ours.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
