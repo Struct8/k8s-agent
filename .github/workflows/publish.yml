@@ -80,7 +80,13 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
             type=raw,value=edge,enable={{is_default_branch}}
-            type=sha,prefix={{branch}}-
+            # `enable` is not optional here. On a TAG push there is no branch, so
+            # `{{branch}}` expands to nothing and the tag becomes `:-<sha>`,
+            # which Docker rejects as an invalid reference -- failing the whole
+            # build after the tests have already passed. That made every release
+            # push fail while branch pushes kept working, so the breakage stayed
+            # invisible until the first `v*` tag was cut (2026-08-05).
+            type=sha,prefix={{branch}}-,enable={{is_default_branch}}
           flavor: |
             latest=auto
 
