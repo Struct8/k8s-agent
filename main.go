@@ -25,6 +25,16 @@ func main() {
 		log.Fatalf("could not build the Kubernetes client (running outside a Pod?): %v", err)
 	}
 
+	// Separate from the dynamic client because it fails for a different reason
+	// and at a different time: the dynamic client only needs the in-cluster
+	// config, while this one talks to the discovery API. Failing here is fatal
+	// for the same reason -- without it every CRD query answers "unknown_kind",
+	// which the caller draws exactly like "not deployed".
+	mapper, err := buildRESTMapper()
+	if err != nil {
+		log.Fatalf("could not build the discovery RESTMapper: %v", err)
+	}
+
 	store := newMetricStore(cfg.RetentionHours, cfg.MaxSeries)
 
 	// Authentication exists only when there is a token. Without one, loadConfig
@@ -41,7 +51,7 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/status", protected(newStatusHandler(client)))
+	mux.HandleFunc("/status", protected(newStatusHandler(client, mapper)))
 	mux.HandleFunc("/metrics-query", protected(newMetricsQueryHandler(store)))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
