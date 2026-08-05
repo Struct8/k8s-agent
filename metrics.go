@@ -155,9 +155,15 @@ type ingestRequestBody struct {
 	Points []metricPoint `json:"points"`
 }
 
-// The same ceiling the receiving API enforces. A large cluster easily exceeds
-// 500 points in a single collection, so the push is always batched.
-const maxPointsPerRequest = 500
+// The ceiling the receiving API enforces, which in turn comes from the limit of
+// the time-series backend it writes to: 250 points per request.
+//
+// This was 500 on both sides. A batch passed validation here and at the
+// receiver, then hit the platform ceiling at the end of the line, where there is
+// nobody left to report it -- points discarded with no visible error. A large
+// cluster easily exceeds this in a single collection, so the push is always
+// batched; the batch just fits now.
+const maxPointsPerRequest = 250
 
 // pushMetrics tenta TODOS os lotes, mesmo depois de um falhar.
 //

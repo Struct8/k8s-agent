@@ -25,8 +25,24 @@ func main() {
 		log.Fatalf("could not build the Kubernetes client (running outside a Pod?): %v", err)
 	}
 
+	store := newMetricStore(cfg.RetentionHours, cfg.MaxSeries)
+
+	// Authentication exists only when there is a token. Without one, loadConfig
+	// has already guaranteed the listener is on the loopback -- reachable solely
+	// by the tunnel sidecar sharing the Pod's network namespace. Wrapping anyway
+	// with an empty token would be worse than not wrapping:
+	// `requireBearer("")` accepts a request carrying NO header at all, which
+	// looks like protection and is not.
+	protected := func(h http.HandlerFunc) http.HandlerFunc {
+		if cfg.StatusAuthToken == "" {
+			return h
+		}
+		return requireBearer(cfg.StatusAuthToken, h)
+	}
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/status", newStatusHandler(client))
+	mux.HandleFunc("/status", protected(newStatusHandler(client)))
+	mux.HandleFunc("/metrics-query", protected(newMetricsQueryHandler(store)))
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -49,7 +65,8 @@ func main() {
 		}
 	}()
 
-	go runMetricsLoop(ctx, client, cfg)
+	go runMetricsLoop(ctx, client, cfg, store)
+	go runAnnounceLoop(ctx, cfg)
 
 	<-ctx.Done()
 	log.Println("shutting down (signal received)...")
@@ -74,7 +91,7 @@ func collectBudget(interval time.Duration) time.Duration {
 	return budget
 }
 
-func runMetricsLoop(ctx context.Context, client dynamic.Interface, cfg Config) {
+func runMetricsLoop(ctx context.Context, client dynamic.Interface, cfg Config, store *metricStore) {
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	ticker := time.NewTicker(cfg.PushInterval)
 	defer ticker.Stop()
@@ -110,6 +127,13 @@ func runMetricsLoop(ctx context.Context, client dynamic.Interface, cfg Config) {
 		if len(points) == 0 {
 			return
 		}
+
+		// Stored BEFORE pushing, deliberately: the local store is what the chart
+		// reads, and it must not depend on the network to the Worker being up. A
+		// failed push hits the `return` below -- if the write came after it, a
+		// cluster with no outbound path would have no chart at all, which is the
+		// very case keeping the data local is meant to cover.
+		store.Append(points, time.Now())
 
 		pushCtx, cancelPush := context.WithTimeout(ctx, 15*time.Second)
 		defer cancelPush()
