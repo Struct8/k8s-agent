@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -287,6 +288,13 @@ func summarize(kind string, obj *unstructured.Unstructured) statusResult {
 	uid := string(obj.GetUID())
 	outputs := map[string]interface{}{}
 
+	// Every kind that carries a Pod template answers it; the rest return "" and
+	// the key is dropped. Set once here rather than in each workload branch so a
+	// kind added later does not have to remember.
+	if images := podTemplateImages(obj); images != "" {
+		outputs["image"] = images
+	}
+
 	switch kind {
 	case "Pod":
 		phase, _, _ := unstructured.NestedString(obj.Object, "status", "phase")
@@ -435,6 +443,35 @@ func summarize(kind string, obj *unstructured.Unstructured) statusResult {
 
 func readyStatusLabel(ready, desired int64) string {
 	return strconv.FormatInt(ready, 10) + "/" + strconv.FormatInt(desired, 10)
+}
+
+// podTemplateImages reads the container images out of a workload's Pod
+// template, so the caller can show which image the cluster is actually running.
+//
+// "Which build is deployed" has no answer anywhere else in the round trip: the
+// diagram holds the image the user ASKED for, and the two diverge whenever the
+// tag moves, a layer is cached, or the Pod was never replaced. Reading it back
+// off the live object is the only reading that comes from the cluster.
+//
+// Init containers are left out on purpose -- they exit before the workload
+// serves anything, and listing them alongside the real one only makes the
+// answer ambiguous.
+func podTemplateImages(obj *unstructured.Unstructured) string {
+	containers, found, err := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "containers")
+	if !found || err != nil {
+		return ""
+	}
+	images := make([]string, 0, len(containers))
+	for _, c := range containers {
+		m, ok := c.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if image, _ := m["image"].(string); image != "" {
+			images = append(images, image)
+		}
+	}
+	return strings.Join(images, ", ")
 }
 
 type condition struct {

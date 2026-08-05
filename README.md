@@ -126,9 +126,39 @@ Published for `linux/amd64` and `linux/arm64`. Built from
 `gcr.io/distroless/static-debian12`, which contains no shell and no package
 manager, and runs as UID 65532 rather than root.
 
-Pin a version. The `latest` tag moves only on a tagged release, but with
-`imagePullPolicy: IfNotPresent` a node can still serve a cached layer, which
-makes an old build look like a sync that never happened.
+Every push publishes more than one tag, and they do not behave alike:
+
+| Tag | Moves? | What it is for |
+| --- | --- | --- |
+| `X.Y.Z` | never | A release. Deploy this. |
+| `main-<sha>` | never | The build of one commit on `main`. Deploy this to try a change before it is released. |
+| `X.Y`, `X` | on each release in that line | Reading a changelog, not a deployment. |
+| `edge` | on every push to `main` | Reading, not a deployment. |
+| `latest` | on each release | Reading, not a deployment. |
+
+Deploy only a tag that never moves. A moving tag leaves the manifest byte for
+byte identical from one build to the next, so a GitOps controller finds nothing
+to apply, the Pod is never replaced, and the cluster keeps running the previous
+build while every sync is reported as successful.
+
+### Which build is running
+
+The first line the agent writes to its log is its own version:
+
+```
+[agent] version 0.3.0
+```
+
+The same string comes back from `/healthz`, as `{"version":"0.3.0"}`.
+
+This is the reading that settles a disagreement between the diagram and the
+cluster, and it is the only one that can: the image reference in the manifest
+says which build was requested, and a moving tag, a cached layer, or a Pod that
+was never replaced each leave the two pointing at different code with nothing
+reporting an error.
+
+In Struct8, the same answer is on the agent node itself — the status panel shows
+the `image` the running workload reports back.
 
 ## Verifying it yourself
 

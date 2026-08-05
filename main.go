@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"os/signal"
@@ -11,9 +12,24 @@ import (
 	"k8s.io/client-go/dynamic"
 )
 
+// Overwritten at build time by the Dockerfile (-ldflags "-X main.agentVersion=...")
+// with the same tag the image was published under. It stays "dev" for a local
+// `go build`, which is the honest answer there.
+//
+// This exists because nothing else in the system can answer "which build is
+// running". The image reference in the manifest answers which build was
+// REQUESTED: a moving tag, a cached layer, or a Pod that was never replaced all
+// break that equality, and every one of those failures looks identical from
+// outside -- an agent that answers every request, correctly, using old code.
+var agentVersion = "dev"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	// First line of the log, before anything can fail. Reading the Pod's log is
+	// then enough to tell an old build from a new one.
+	log.Printf("[agent] version %s", agentVersion)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -53,8 +69,14 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/status", protected(newStatusHandler(client, mapper)))
 	mux.HandleFunc("/metrics-query", protected(newMetricsQueryHandler(store)))
+	// Deliberately outside `protected`: this is the kubelet's probe, and it
+	// carries no token. The version it returns is the same string already
+	// printed to the log -- public in the image tag either way, and never
+	// reachable from outside the Pod unless the operator published the port.
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"version": agentVersion})
 	})
 
 	// By default this listens on the Pod's loopback only, and nothing outside the

@@ -14,11 +14,17 @@ FROM --platform=$BUILDPLATFORM golang:1.22 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
+# The tag this image is being published under, burned into the binary so the
+# running Pod can say which build it is. Supplied by the publish workflow; the
+# default keeps a plain `docker build` honest instead of claiming a version.
+ARG VERSION=dev
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -o /out/k8s-agent .
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
+    go build -ldflags "-X main.agentVersion=${VERSION}" -o /out/k8s-agent .
 
 # distroless:static has no shell and no package manager. This container runs
 # inside a customer's cluster holding a read-only ClusterRole; the smaller the

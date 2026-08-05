@@ -101,5 +101,33 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Burned into the binary and printed as the first line of the Pod's
+          # log. Without it there is no way to tell which build is answering:
+          # the agent serves every request correctly using old code, and the
+          # only visible symptom is a diagram that disagrees with the cluster.
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # The one tag that is safe to deploy for a test build, spelled out so it
+      # can be copied straight into the Agent node's "Agent image" field.
+      #
+      # `edge` and `latest` are excluded because they move. A moving tag changes
+      # nothing in the manifest, so Argo CD sees no difference, never replaces
+      # the Pod, and the cluster keeps running the previous build with every
+      # sync reported as successful.
+      - name: Image reference to deploy
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          REF=$(printf '%s\n' "$TAGS" | grep -vE ':(latest|edge)$' | head -n 1)
+          {
+            echo "### Agent image"
+            echo
+            echo "Paste into the **Agent image** field of the Struct8 Agent node, then compile and push the state:"
+            echo
+            echo '```'
+            echo "$REF"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
