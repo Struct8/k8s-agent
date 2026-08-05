@@ -28,16 +28,16 @@ func main() {
 	store := newMetricStore(cfg.RetentionHours, cfg.MaxSeries)
 
 	// Authentication exists only when there is a token. Without one, loadConfig
-	// has already guaranteed the listener is on the loopback -- reachable solely
-	// by the tunnel sidecar sharing the Pod's network namespace. Wrapping anyway
+	// has already guaranteed the listener is on the loopback -- reachable only
+	// from inside this Pod. Wrapping anyway
 	// with an empty token would be worse than not wrapping:
 	// `requireBearer("")` accepts a request carrying NO header at all, which
 	// looks like protection and is not.
 	protected := func(h http.HandlerFunc) http.HandlerFunc {
-		if cfg.StatusAuthToken == "" {
+		if cfg.AuthToken == "" {
 			return h
 		}
-		return requireBearer(cfg.StatusAuthToken, h)
+		return requireBearer(cfg.AuthToken, h)
 	}
 
 	mux := http.NewServeMux()
@@ -47,11 +47,10 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 
-	// Escuta só na interface local do pod -- nunca exposto fora do cluster.
-	// O cloudflared roda como um segundo container no MESMO Pod (mesmo
-	// network namespace) e alcança isto via 127.0.0.1, e é ELE quem
-	// estabelece a conexão de saída pro túnel; este processo nunca abre nada
-	// pra fora.
+	// By default this listens on the Pod's loopback only, and nothing outside the
+	// Pod can reach it. Serving on a routable address is opt-in and requires
+	// AUTH_TOKEN -- loadConfig refuses the combination without it, so there is no
+	// state in which this port is published and unauthenticated.
 	server := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           mux,

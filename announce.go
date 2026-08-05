@@ -35,7 +35,7 @@ type agentEndpointBody struct {
 func announceEndpoint(ctx context.Context, httpClient *http.Client, cfg Config) error {
 	body, err := json.Marshal(agentEndpointBody{
 		StatusURL:   cfg.StatusPublicURL,
-		StatusToken: cfg.StatusAuthToken,
+		StatusToken: cfg.AuthToken,
 	})
 	if err != nil {
 		return err
@@ -67,7 +67,7 @@ func announceEndpoint(ctx context.Context, httpClient *http.Client, cfg Config) 
 // the loopback (loadConfig refuses otherwise), and with no public URL there is
 // no path from outside in.
 func runAnnounceLoop(ctx context.Context, cfg Config) {
-	if cfg.StatusPublicURL == "" || cfg.StatusAuthToken == "" {
+	if cfg.StatusPublicURL == "" || cfg.AuthToken == "" {
 		log.Printf("[announce] no public status address configured; this cluster cannot be queried")
 		return
 	}

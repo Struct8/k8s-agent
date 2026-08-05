@@ -19,7 +19,7 @@ type Config struct {
 	WorkerBaseURL   string
 	PushInterval    time.Duration
 	ListenAddr      string
-	StatusAuthToken string
+	AuthToken       string
 	StatusPublicURL string
 	RetentionHours  int
 	MaxSeries       int
@@ -31,7 +31,7 @@ func loadConfig() (Config, error) {
 		ClusterAPIKey:   os.Getenv("CLUSTER_API_KEY"),
 		WorkerBaseURL:   os.Getenv("WORKER_BASE_URL"),
 		ListenAddr:      getEnvDefault("LISTEN_ADDR", "127.0.0.1:8080"),
-		StatusAuthToken: os.Getenv("STATUS_AUTH_TOKEN"),
+		AuthToken:       os.Getenv("AUTH_TOKEN"),
 		StatusPublicURL: strings.TrimSpace(os.Getenv("STATUS_PUBLIC_URL")),
 	}
 
@@ -46,15 +46,19 @@ func loadConfig() (Config, error) {
 	}
 
 	// Publishing the port is a CONSEQUENCE of having a token, never the default.
-	// With no token the agent stays on the loopback, reachable only by the tunnel
-	// sidecar that shares the Pod's network namespace (see README.md).
+	// With no token the agent stays on the loopback, reachable only from inside
+	// its own Pod (see README.md).
+	//
+	// The same token guards both endpoints -- /status and /metrics-query -- which
+	// is why it is AUTH_TOKEN and not STATUS_AUTH_TOKEN: the name was written
+	// when status was the only thing served from this port.
 	//
 	// Refusing here -- rather than serving unauthenticated -- is what closes the
 	// window: the Pod crash-loops, which is loud, instead of coming up healthy
 	// while exposing cluster state to anyone who reaches the route.
-	if !isLoopbackAddr(cfg.ListenAddr) && cfg.StatusAuthToken == "" {
+	if !isLoopbackAddr(cfg.ListenAddr) && cfg.AuthToken == "" {
 		return cfg, fmt.Errorf(
-			"refusing to listen on %q without STATUS_AUTH_TOKEN: an address outside the loopback is reachable from outside the Pod",
+			"refusing to listen on %q without AUTH_TOKEN: an address outside the loopback is reachable from outside the Pod",
 			cfg.ListenAddr,
 		)
 	}
