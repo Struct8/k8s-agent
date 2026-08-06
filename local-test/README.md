@@ -1,9 +1,13 @@
-# Run the agent yourself and read what it sends
+# Run the agent yourself and read every byte it sends
 
 Reading the source tells you what the agent is supposed to do. This walkthrough
 shows you what it actually does: it runs the agent on a throwaway cluster on
-your own machine, points it at a receiver you control instead of the Struct8
-API, and prints every byte that would have left your network.
+your own machine, puts a receiver you control in the place of both the Struct8
+API and your Prometheus, and prints everything either of them gets.
+
+The result worth watching is how little arrives. The agent sends one message
+unasked — the address it can be reached at — and after that the terminal stays
+quiet until you ask it something.
 
 Nothing here involves Struct8. No account, no credential, no network call to
 us. The whole thing is deleted in one command at the end.
@@ -16,30 +20,15 @@ us. The whole thing is deleted in one command at the end.
   single binary that runs Kubernetes inside Docker
 - Python 3, for the receiver
 
-## 1. A throwaway cluster with metrics-server
+## 1. A throwaway cluster
 
 ```bash
 kind create cluster --name struct8-agent-test --wait 90s
 ```
 
-```bash
-kubectl --context kind-struct8-agent-test apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
-```
-
-kind nodes use self-signed kubelet certificates, which metrics-server rejects
-by default — without the following patch it stays NotReady forever and no
-metrics ever appear:
-
-```bash
-kubectl --context kind-struct8-agent-test patch deployment metrics-server -n kube-system --type=json -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--kubelet-insecure-tls"}]'
-```
-
-```bash
-kubectl --context kind-struct8-agent-test top nodes
-```
-
-When that last command returns numbers, the data source the agent depends on
-is working.
+That is the whole prerequisite. Nothing has to be installed inside the cluster:
+status comes from the Kubernetes API, and charts are forwarded to a Prometheus
+that `receiver.py` will impersonate in step 3.
 
 ## 2. Build the image and load it into the cluster
 
@@ -62,8 +51,9 @@ In a separate terminal, from this directory:
 python3 receiver.py
 ```
 
-It listens on port 8099 and prints every batch it receives, in full. This is
-the Struct8 API's place in the chain, and now you own it.
+It listens on port 8099 and prints everything it receives, in full. It stands in
+for both of the agent's counterparts at once — the Struct8 API and your
+Prometheus — and now you own both.
 
 ## 4. Deploy the agent
 
@@ -77,33 +67,22 @@ kubectl --context kind-struct8-agent-test apply -f agent.yaml
 
 [`agent.yaml`](agent.yaml) is self-contained and readable: ServiceAccount,
 the read-only ClusterRole, its binding, and the Deployment. On Linux, change
-`WORKER_BASE_URL` from `host.docker.internal` to your host's IP on the docker0
-bridge.
+`host.docker.internal` to your host's IP on the docker0 bridge.
 
-Within about ten seconds the receiver terminal starts printing batches:
+**Now watch the receiver terminal, and notice that nothing happens.** No metric
+is collected, batched or uploaded, because the agent no longer does any of
+those. Leave it running as long as you like.
 
-```json
-{
-  "points": [
-    {"metric": "cpu", "namespace": "kube-system", "kind": "Deployment",
-     "name": "coredns", "value": 0.004},
-    {"metric": "memory", "namespace": "kube-system", "kind": "Deployment",
-     "name": "coredns", "value": 14.2}
-  ]
-}
-```
-
-**That is the entire payload.** Five fields per point — `metric`, `namespace`,
-`kind`, `name`, `value` — where `cpu` is in cores and `memory` in MiB. The
-struct that produces it is `metricPoint` in [`../metrics.go`](../metrics.go),
-and it has no other fields. No object contents, no environment variables, no
-logs. Leave it running as long as you like; the shape never changes.
-
-The agent's own logs show the same cycle from its side:
+The agent's own log says the same thing from its side, starting with the version
+it is built from:
 
 ```bash
 kubectl --context kind-struct8-agent-test logs -n struct8-agent-test deployment/struct8-agent -f
 ```
+
+The one message that does travel unasked is the announcement of the agent's own
+address — and in this walkthrough it is not sent at all, because `agent.yaml`
+deploys no tunnel and so there is no address to announce.
 
 ## 5. Prove the permissions are read-only
 
@@ -153,7 +132,29 @@ In this walkthrough nothing outside the cluster can reach that endpoint —
 requires a Cloudflare Tunnel token that you supply. Omit it and the status
 channel does not exist.
 
-## 7. Delete everything
+## 7. A chart's query
+
+With the same `port-forward` still running, ask for a chart the way Struct8 does:
+
+```bash
+curl -s -X POST http://127.0.0.1:18080/metrics-query -H "Content-Type: application/json" -d '{"metric":"cpu","namespace":"kube-system","kind":"Deployment","name":"coredns","start":1785975600,"end":1785979200,"granularity":"minute","promql":"sum(rate(container_cpu_usage_seconds_total{namespace=\"{namespace}\",pod=~\"{name}-.*\"}[5m]))"}'
+```
+
+The receiver terminal prints the query it received, and the agent returns the
+series the receiver invented for it:
+
+```json
+{"bucketSeconds":60,"points":[{"bucket":1785975600,"value":0.25},{"bucket":1785975900,"value":0.5}]}
+```
+
+Two things are visible in that exchange. The query is **not** the agent's: it
+arrived in the request, from the resource's entry in Struct8's catalogue, and
+the agent refuses a request that carries none. And `{namespace}` and `{name}`
+were filled in here, escaped, so a resource named `a"} or up{` cannot rewrite
+the query into one about something else — see `renderPromQL` in
+[`../query.go`](../query.go).
+
+## 8. Delete everything
 
 ```bash
 kind delete cluster --name struct8-agent-test

@@ -23,9 +23,8 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services", "endpoints", "nodes"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods", "nodes"]
-    verbs: ["get", "list"]
+  # metrics.k8s.io is deliberately absent: charts are answered by Prometheus
+  # over HTTP, using no Kubernetes permission at all.
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
     verbs: ["get", "list", "watch"]
@@ -73,13 +72,16 @@ spec:
               value: local-test
             - name: CLUSTER_API_KEY
               value: local-test-key
-            # Where the metrics go. host.docker.internal is the machine running
-            # kind, as seen from inside the cluster (Docker Desktop). On Linux,
-            # use the host IP on the docker0 bridge instead.
+            # Both point at receiver.py. host.docker.internal is the machine
+            # running kind, as seen from inside the cluster (Docker Desktop).
+            # On Linux, use the host IP on the docker0 bridge instead.
+            #
+            # In a real deployment these are two different places: the Struct8
+            # API, and a Prometheus inside your own cluster.
             - name: WORKER_BASE_URL
               value: http://host.docker.internal:8099
-            - name: PUSH_INTERVAL_SECONDS
-              value: "10"
+            - name: PROMETHEUS_URL
+              value: http://host.docker.internal:8099
           resources:
             requests:
               cpu: 50m

@@ -8,12 +8,13 @@ import (
 	"k8s.io/client-go/restmapper"
 )
 
-// Um único client dinâmico serve tanto as consultas de STATUS (recursos
-// nativos -- Pod/Deployment/DaemonSet/StatefulSet/Job/CronJob) quanto as de
-// MÉTRICAS (metrics.k8s.io, servido pelo metrics-server já instalado no
-// cluster do cliente -- ver README.md). Evita depender do módulo
-// k8s.io/metrics só pra tipar PodMetrics/NodeMetrics: o schema de
-// metrics.k8s.io é simples o bastante pra ler via unstructured.
+// The dynamic client serves STATUS queries, and only those: any kind, native or
+// custom, resolved through the RESTMapper below rather than through a typed
+// client generated per group.
+//
+// Metrics do not pass through here at all since 0.4.0 -- a chart is forwarded to
+// Prometheus over plain HTTP (see prometheus.go) and needs no Kubernetes
+// permission, which is why `metrics.k8s.io` is absent from the ClusterRole.
 func buildDynamicClient() (dynamic.Interface, error) {
 	config, err := rest.InClusterConfig()
 	if err != nil {

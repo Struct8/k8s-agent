@@ -4,9 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"strconv"
 	"strings"
-	"time"
 )
 
 // Agent configuration -- every value arrives as an environment variable, with
@@ -17,12 +15,16 @@ type Config struct {
 	ClusterID       string
 	ClusterAPIKey   string
 	WorkerBaseURL   string
-	PushInterval    time.Duration
 	ListenAddr      string
 	AuthToken       string
 	StatusPublicURL string
-	RetentionHours  int
-	MaxSeries       int
+
+	// Where to send the chart's queries. Optional, and its absence is a state
+	// the agent runs in rather than an error: status keeps working and the
+	// metrics endpoint answers with what is missing. An agent that refused to
+	// start over this would take status down with it, over a feature the
+	// operator may not want.
+	PrometheusURL string
 }
 
 func loadConfig() (Config, error) {
@@ -33,6 +35,7 @@ func loadConfig() (Config, error) {
 		ListenAddr:      getEnvDefault("LISTEN_ADDR", "127.0.0.1:8080"),
 		AuthToken:       os.Getenv("AUTH_TOKEN"),
 		StatusPublicURL: strings.TrimSpace(os.Getenv("STATUS_PUBLIC_URL")),
+		PrometheusURL:   strings.TrimSpace(os.Getenv("PROMETHEUS_URL")),
 	}
 
 	if cfg.ClusterID == "" {
@@ -63,37 +66,12 @@ func loadConfig() (Config, error) {
 		)
 	}
 
-	intervalSeconds := 20
-	if raw := os.Getenv("PUSH_INTERVAL_SECONDS"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 5 {
-			return cfg, fmt.Errorf("invalid PUSH_INTERVAL_SECONDS (minimum 5): %q", raw)
-		}
-		intervalSeconds = parsed
-	}
-	cfg.PushInterval = time.Duration(intervalSeconds) * time.Second
-
-	// How much history is kept in memory. 48 h in five-minute buckets is 576
-	// points per series; what sizes the Pod is that number times MAX_SERIES.
-	cfg.RetentionHours = 48
-	if raw := os.Getenv("RETENTION_HOURS"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
-			return cfg, fmt.Errorf("invalid RETENTION_HOURS (minimum 1): %q", raw)
-		}
-		cfg.RetentionHours = parsed
-	}
-
-	// Series ceiling: a large cluster degrades -- dropping the least recently
-	// written series -- instead of dying of OOM and taking status down with it.
-	cfg.MaxSeries = 5000
-	if raw := os.Getenv("MAX_SERIES"); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 1 {
-			return cfg, fmt.Errorf("invalid MAX_SERIES (minimum 1): %q", raw)
-		}
-		cfg.MaxSeries = parsed
-	}
+	// PUSH_INTERVAL_SECONDS, RETENTION_HOURS and MAX_SERIES were removed when
+	// the agent stopped collecting and storing series (2026-08-06). They sized
+	// an in-memory store that no longer exists; Prometheus owns retention now.
+	// They are deliberately not rejected if still present in an old manifest:
+	// crash-looping over a leftover environment variable would take status down
+	// during the very rollout that removes it.
 
 	return cfg, nil
 }

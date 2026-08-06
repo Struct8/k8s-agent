@@ -1,9 +1,13 @@
 # Struct8 Kubernetes Agent
 
-Reports CPU and memory usage per workload, and the deployment status of
-individual objects, from a Kubernetes cluster back to [Struct8](https://struct8.com).
-It is the data source behind the metric charts and the deployed/not-deployed
-state shown on a Struct8 diagram.
+Answers two questions about a Kubernetes cluster on behalf of
+[Struct8](https://struct8.com): the deployment status of individual objects, and
+whatever your own Prometheus knows about them. It is what puts the
+deployed/not-deployed state and the metric charts on a Struct8 diagram.
+
+It stores nothing. Status is read from the Kubernetes API when you look at the
+diagram, and a chart is forwarded to Prometheus and forwarded back — no series
+is kept here, and none is sent anywhere on a timer.
 
 It runs as a single Deployment in your cluster. There is no Helm chart to
 install by hand: Struct8 generates the manifest, and it reaches the cluster
@@ -18,85 +22,88 @@ The agent holds a **read-only** ClusterRole. It has no `create`, `update`,
 `patch`, or `delete` verb on anything, so it cannot change the state of your
 cluster even if it were compromised.
 
-It reads two things:
-
-- **`metrics.k8s.io`** — CPU and memory of running Pods. This comes from
-  metrics-server, the same source as `kubectl top`.
-- **Object status** — the `.status` of the object kinds listed in the RBAC
-  below, to answer whether a given object exists and is healthy.
+It reads one thing from Kubernetes: the `.status` of the object kinds granted in
+the ClusterRole, to answer whether a given object exists and is healthy.
+Everything on a chart comes from Prometheus instead, over HTTP, using no
+Kubernetes permission at all.
 
 It does **not** read Secrets, ConfigMaps, environment variables, container
 logs, or the contents of any volume. It does not execute into containers.
 Those permissions are absent from the ClusterRole, not merely unused.
 
-### The exact ClusterRole
+### The ClusterRole
+
+Struct8 generates it from the resource types actually drawn on your diagram, so
+the exact list is yours rather than fixed here. Its shape is always the same:
 
 ```yaml
 rules:
   - apiGroups: [""]
     resources: ["pods", "services", "endpoints", "nodes"]
     verbs: ["get", "list", "watch"]
-  - apiGroups: ["metrics.k8s.io"]
-    resources: ["pods", "nodes"]
-    verbs: ["get", "list"]
   - apiGroups: ["apps"]
     resources: ["deployments", "daemonsets", "statefulsets", "replicasets"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
+  # plus one entry per custom resource on the diagram -- Gateway API, Argo CD,
+  # Kong and so on -- always with these same three read verbs.
 ```
 
-A status query for a kind outside this list returns `unknown_kind`. The agent
-never attempts a call it lacks permission for.
+Only read verbs appear, whatever is on the diagram. A status query for a kind
+outside the list returns `unknown_kind`; the agent never attempts a call it
+lacks permission for.
 
 ## How data leaves the cluster
 
-Two independent channels, with different network requirements. Metrics work
-on their own; status is optional and can be left off entirely.
+**Nothing leaves on a timer.** The agent answers questions and is otherwise
+silent. Data crosses the boundary only while someone has the diagram open, and
+only about the resources drawn on it.
 
-**Metrics — outbound push, no inbound access.** Every `PUSH_INTERVAL_SECONDS`
-(20 by default) the agent collects usage and sends it over ordinary HTTPS to
-the Struct8 API. Nothing outside the cluster connects in. If your egress
-policy allows HTTPS to the configured endpoint, this works; there is no port
-to open and no firewall rule to add.
-
-**Status — pull, and only if you enable it.** Answering "does this object
-exist right now" requires Struct8 to ask at the moment you look at the
-diagram. The status server binds to `127.0.0.1:8080` and is **never** exposed
-outside the Pod. Reaching it uses a second container in the same Pod running
+**Both channels are pull.** Answering "does this object exist right now", or
+"what did CPU do last hour", requires Struct8 to ask at the moment you look. The
+server binds to `127.0.0.1:8080` and is **never** exposed outside the Pod.
+Reaching it uses a second container in the same Pod running
 [`cloudflared`](https://github.com/cloudflare/cloudflared), which opens an
-outbound tunnel and forwards requests over the Pod's loopback interface. Leave
-`cloudflare_tunnel_token` empty in Struct8 and that container is not deployed
-at all — you get a metrics-only agent with no inbound path of any kind.
+outbound tunnel and forwards requests over the Pod's loopback interface. There
+is no inbound port to open and no firewall rule to add.
 
-## Metrics are attributed per workload, not per Pod
+**The one outbound message.** Once the tunnel is up, the agent tells the Struct8
+API which address to reach it at. That is the only thing it sends unasked, and it
+carries no cluster data — just the endpoint and its token.
 
-A chart in Struct8 asks about `Deployment#checkout`, not about the individual
-Pods behind it. So the agent resolves each Pod's owner through
-`ownerReferences` (`Pod → ReplicaSet → Deployment`, or a single hop for
-`StatefulSet`, `DaemonSet`, and `Job`) and sums the Pods before sending. A Pod
-with no owner is reported as itself. See [`owners.go`](owners.go).
+Leave `cloudflare_tunnel_token` empty in Struct8 and the tunnel container is not
+deployed at all. The agent then has no inbound path of any kind, and neither
+status nor charts can be answered.
 
-The chain deliberately stops at `Job` rather than climbing to `CronJob`: the
-extra hop costs another listing every cycle for a kind nothing queries.
+## Metrics come from your Prometheus
 
-One visible consequence: during a rollout, Pods from the previous ReplicaSet
-are still running and still counted, so the value rises until the rollout
-finishes. That is the correct answer to "what does this workload consume right
-now", not an artifact.
+The agent runs no collection of its own. A chart in Struct8 carries the query
+that draws it — declared with the resource type, in Struct8's own catalogue —
+and the agent forwards it to the Prometheus at `PROMETHEUS_URL`, then returns
+the series.
+
+Two consequences worth knowing:
+
+- **Retention, resolution and cardinality are your Prometheus's business.** The
+  agent holds no history, so the chart can go back as far as your retention does,
+  and the Pod's memory does not grow with the number of workloads.
+- **A chart can only show what Prometheus scrapes.** For CPU and memory per
+  workload that means cAdvisor (through the kubelet) plus `kube-state-metrics`,
+  which is what maps a Pod back to the Deployment that owns it. Without the
+  second one, a chart asking about a Deployment answers empty.
 
 ## Requirements
 
-**metrics-server must already be installed.** The agent reads `metrics.k8s.io`
-and does not provide it. Without metrics-server the agent still starts and
-still answers status, but CPU and memory come back empty. Check with:
+**A reachable Prometheus.** The agent needs an HTTP address it can reach from
+inside the cluster; the Prometheus Operator publishes one as
+`http://prometheus-operated.<namespace>:9090`. Anything speaking the Prometheus
+HTTP API works, including a managed one, as long as the Pod can reach it.
 
-```bash
-kubectl top nodes
-```
-
-If that command works, the agent has what it needs.
+Leave `PROMETHEUS_URL` empty and the agent still starts and still answers status
+— charts report that no Prometheus is configured, which is a different statement
+from a workload that used nothing.
 
 ## Configuration
 
@@ -107,14 +114,20 @@ documented here so you can verify the generated manifest.
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `CLUSTER_ID` | yes | — | Identifies which cluster this agent reports for. |
-| `CLUSTER_API_KEY` | yes | — | Write-only credential for pushing metrics. Delivered through a Kubernetes Secret, never in plain text in the Deployment. |
-| `WORKER_BASE_URL` | yes | — | The Struct8 API endpoint that receives metrics. |
-| `PUSH_INTERVAL_SECONDS` | no | `20` | Collection and send interval. Minimum 5. |
-| `LISTEN_ADDR` | no | `127.0.0.1:8080` | Address of the local status server. |
+| `CLUSTER_ID` | yes | — | Identifies which cluster this agent answers for. |
+| `CLUSTER_API_KEY` | yes | — | Credential for announcing this agent's address. Delivered through a Kubernetes Secret, never in plain text in the Deployment. |
+| `WORKER_BASE_URL` | yes | — | The Struct8 API endpoint the address is announced to. |
+| `PROMETHEUS_URL` | no | — | Where to send a chart's query, e.g. `http://prometheus-operated.monitoring:9090`. Empty means charts answer that no Prometheus is configured; status is unaffected. |
+| `LISTEN_ADDR` | no | `127.0.0.1:8080` | Address of the local server. |
+| `AUTH_TOKEN` | see note | — | Bearer token required on `/status` and `/metrics-query`. Mandatory whenever `LISTEN_ADDR` is not on the loopback — the agent refuses to start otherwise, rather than coming up healthy while exposing cluster state. |
 
-`CLUSTER_API_KEY` grants **write only**. It can push metric points for its own
+`CLUSTER_API_KEY` grants **write only**. It can announce an address for its own
 cluster and nothing else — it cannot read any data back, including your own.
+
+`PUSH_INTERVAL_SECONDS`, `RETENTION_HOURS` and `MAX_SERIES` were removed in
+0.4.0, when collection and the in-memory store were dropped. Leaving them in an
+old manifest is harmless: they are ignored, deliberately, so that removing them
+is not a condition for the agent to start.
 
 ## Images
 
@@ -163,10 +176,11 @@ the `image` the running workload reports back.
 ## Verifying it yourself
 
 [`local-test/`](local-test/) walks through running the agent against a
-throwaway `kind` cluster on your own machine: create the cluster, install
-metrics-server, deploy the agent, and watch what it sends. Pointing it at a
-local HTTP receiver instead of the Struct8 API shows you the exact payload
-that would leave your network.
+throwaway `kind` cluster on your own machine: create the cluster, deploy the
+agent, and watch what it sends. A local HTTP receiver takes the place of both
+the Struct8 API and your Prometheus, printing everything either one gets — so
+what you end up reading is how little that is, and exactly what a status answer
+and a chart query look like on the wire.
 
 Building from source:
 
