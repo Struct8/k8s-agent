@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -144,7 +145,55 @@ func newStatusHandler(client dynamic.Interface, mapper restMapper) http.HandlerF
 	}
 }
 
+// The label the generator stamps on every object it emits, naming the diagram
+// node the object came from. Used here only to explain an empty match.
+const originLabel = "struct8.io/origin"
+
+// resolveStatus answers one query and, whatever the answer, records WHAT WAS
+// ASKED alongside it.
+//
+// "Nothing found" and "found and not ready" and "the kind does not exist here"
+// all reach the screen as the same faded node, and until now the query that
+// produced them existed nowhere the caller could see -- diagnosing one meant
+// reading the agent's log, which needs cluster access, which is the thing the
+// product exists to avoid.
 func resolveStatus(
+	ctx context.Context,
+	client dynamic.Interface,
+	mapper restMapper,
+	q statusResourceQuery,
+) statusResult {
+	res := resolveOne(ctx, client, mapper, q)
+	if res.Outputs == nil {
+		res.Outputs = map[string]interface{}{}
+	}
+	res.Outputs["query"] = describeQuery(q)
+	return res
+}
+
+// describeQuery renders the request as sent, in the vocabulary of the cluster.
+func describeQuery(q statusResourceQuery) string {
+	kind := q.Kind
+	if q.APIVersion != "" {
+		kind += " (" + q.APIVersion + ")"
+	}
+
+	where := "cluster-wide"
+	if q.Namespace != "" {
+		where = "in " + q.Namespace
+	}
+
+	switch {
+	case q.Selector != "":
+		return kind + " " + where + " where " + q.Selector
+	case q.List:
+		return kind + " " + where + " (every one in it)"
+	default:
+		return kind + " named " + q.Name + " " + where
+	}
+}
+
+func resolveOne(
 	ctx context.Context,
 	client dynamic.Interface,
 	mapper restMapper,
@@ -197,7 +246,11 @@ func resolveStatus(
 			log.Printf("[status] failed to list %s (%s, %s): %v", q.Kind, q.Namespace, q.Selector, err)
 			return statusResult{Deployed: false, Status: "error", Outputs: map[string]interface{}{}}
 		}
-		return summarizeGroup(q.Kind, list.Items)
+		res := summarizeGroup(q.Kind, list.Items)
+		if len(list.Items) == 0 && q.Selector != "" {
+			explainEmptyMatch(ctx, client, gvr, namespace, res.Outputs)
+		}
+		return res
 	}
 
 	var obj *unstructured.Unstructured
@@ -278,6 +331,71 @@ func summarizeGroup(kind string, items []unstructured.Unstructured) statusResult
 		Deployed: ready == len(items),
 		Status:   readyStatusLabel(int64(ready), int64(len(items))),
 		Outputs:  outputs,
+	}
+}
+
+// explainEmptyMatch answers the question an empty match raises: was nothing
+// emitted for this node, or was something emitted and not stamped?
+//
+// Both render as a faded node and they call for opposite work. Nothing emitted
+// means the answer is in the diagram -- the node has no enabled target, or its
+// only target is switched off. Something emitted and unstamped means the answer
+// is in Git -- that state has not been pushed since the label existed. Guessing
+// wrong sends the reader to the wrong half of the product.
+//
+// Costs one extra list, and only on the path that already found nothing.
+func explainEmptyMatch(
+	ctx context.Context,
+	client dynamic.Interface,
+	gvr schema.GroupVersionResource,
+	namespace string,
+	outputs map[string]interface{},
+) {
+	var list *unstructured.UnstructuredList
+	var err error
+	if namespace != "" {
+		list, err = client.Resource(gvr).Namespace(namespace).List(ctx, metav1.ListOptions{})
+	} else {
+		list, err = client.Resource(gvr).List(ctx, metav1.ListOptions{})
+	}
+	if err != nil {
+		// Deliberately silent in the result: this is an explanation, and a
+		// failed explanation must not be mistaken for a finding.
+		log.Printf("[status] could not list %s in %q to explain the empty match: %v", gvr.Resource, namespace, err)
+		return
+	}
+
+	outputs["ofThisKindHere"] = len(list.Items)
+	if len(list.Items) == 0 {
+		return
+	}
+
+	unstamped := 0
+	seen := map[string]bool{}
+	origins := []string{}
+	for i := range list.Items {
+		origin := list.Items[i].GetLabels()[originLabel]
+		if origin == "" {
+			unstamped++
+			continue
+		}
+		if !seen[origin] {
+			seen[origin] = true
+			origins = append(origins, origin)
+		}
+	}
+	sort.Strings(origins)
+
+	// Capped because this is a hint, not an inventory: a namespace with hundreds
+	// of objects would push the real answer off the panel.
+	if len(origins) > 10 {
+		origins = origins[:10]
+	}
+	if len(origins) > 0 {
+		outputs["otherOrigins"] = origins
+	}
+	if unstamped > 0 {
+		outputs["withoutOriginLabel"] = unstamped
 	}
 }
 
