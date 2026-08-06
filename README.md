@@ -94,6 +94,28 @@ Two consequences worth knowing:
   which is what maps a Pod back to the Deployment that owns it. Without the
   second one, a chart asking about a Deployment answers empty.
 
+### A query declares its own scope
+
+`POST /metrics-query` always needs `metric`, `promql`, `start`, `end` and
+`granularity`. The three identity fields — `namespace`, `name` and `kind` — are
+required **only when the query uses the matching placeholder**:
+
+| the query contains | the request must carry |
+|---|---|
+| `{namespace}` | `namespace` |
+| `{name}` | `name` |
+| `{kind}` | `kind` |
+
+So a query about one workload sends all three, a query about a namespace sends
+only `namespace`, and a query about the whole cluster sends none. Sending a
+placeholder without its value is refused with 400 naming the field: left to
+proceed, `{namespace}` would reach Prometheus as literal text and the answer
+would be about a namespace by that name — an empty chart with no error anywhere.
+
+Values are substituted into the query by the agent, escaped, and never
+concatenated by the caller. Before v0.5.0 all three were mandatory, which made
+namespace-wide and cluster-wide charts impossible to ask for.
+
 ## Requirements
 
 **A reachable Prometheus.** The agent needs an HTTP address it can reach from

@@ -204,6 +204,102 @@ func TestMissingPromQLIsRefused(t *testing.T) {
 	}
 }
 
+// A chart about the whole cluster filters by nothing, so there is no namespace,
+// no name and no kind to send -- and until v0.5.0 that was refused, which made
+// "how much CPU is in use across everything" impossible to ask for.
+func TestClusterWideQueryNeedsNoIdentity(t *testing.T) {
+	fake := newFakePrometheus(oneSeries)
+	defer fake.close()
+
+	rec := askMetrics(t, newPrometheusClient(fake.server.URL), map[string]interface{}{
+		"metric":      "cpu",
+		"start":       1785975600,
+		"end":         1785979200,
+		"granularity": "minute",
+		"promql":      `sum(rate(container_cpu_usage_seconds_total{container!=""}[5m]))`,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 -- body: %s", rec.Code, rec.Body.String())
+	}
+	if fake.calls != 1 {
+		t.Fatalf("Prometheus was queried %d time(s), want 1", fake.calls)
+	}
+	// The query reaches Prometheus untouched: with no placeholder to fill, the
+	// empty identity must not leak into it as an empty label matcher.
+	if strings.Contains(fake.lastQ, `""`) && strings.Contains(fake.lastQ, "namespace=") {
+		t.Errorf("query = %s, want no namespace matcher at all", fake.lastQ)
+	}
+}
+
+// A query about one namespace needs the namespace and nothing else. This is the
+// half-way scope, and the one that proves the rule is per-placeholder rather
+// than "all or nothing".
+func TestNamespaceQueryNeedsOnlyTheNamespace(t *testing.T) {
+	fake := newFakePrometheus(oneSeries)
+	defer fake.close()
+
+	rec := askMetrics(t, newPrometheusClient(fake.server.URL), map[string]interface{}{
+		"metric":      "cpu",
+		"namespace":   "gamestest",
+		"start":       1785975600,
+		"end":         1785979200,
+		"granularity": "minute",
+		"promql":      `sum(rate(container_cpu_usage_seconds_total{namespace="{namespace}"}[5m]))`,
+	})
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 -- body: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(fake.lastQ, `namespace="gamestest"`) {
+		t.Errorf("query = %s, want the namespace substituted", fake.lastQ)
+	}
+}
+
+// The relaxation must not become a hole: a query that DOES ask for a placeholder
+// still fails without it. Otherwise `{namespace}` would survive into PromQL as
+// literal text and Prometheus would answer about a namespace called
+// "{namespace}" -- an empty chart with no error anywhere.
+func TestPlaceholderWithoutItsValueIsStillRefused(t *testing.T) {
+	fake := newFakePrometheus(oneSeries)
+	defer fake.close()
+
+	body := validBody()
+	delete(body, "namespace")
+	rec := askMetrics(t, newPrometheusClient(fake.server.URL), body)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "namespace") {
+		t.Errorf("body = %q, want the name of the field that was missing", rec.Body.String())
+	}
+	if fake.calls != 0 {
+		t.Errorf("Prometheus was queried %d time(s) for an unsatisfiable request", fake.calls)
+	}
+}
+
+// The scope survives as words in the log. A cluster-wide failure used to print
+// as "cpu / ()", which reads like corrupted input rather than the widest scope
+// there is -- and this line is what someone reads to decide whether the fault is
+// in one workload or everywhere.
+func TestScopeIsReadableAtEveryWidth(t *testing.T) {
+	casos := []struct {
+		nome string
+		body metricsQueryBody
+		want string
+	}{
+		{"workload", metricsQueryBody{Kind: "Deployment", Name: "kuma", Namespace: "gamestest"}, "Deployment/kuma in gamestest"},
+		{"namespace", metricsQueryBody{Namespace: "gamestest"}, "namespace gamestest"},
+		{"cluster", metricsQueryBody{}, "whole cluster"},
+	}
+	for _, c := range casos {
+		if got := describeScope(c.body); got != c.want {
+			t.Errorf("%s: describeScope = %q, want %q", c.nome, got, c.want)
+		}
+	}
+}
+
 // A month at one-minute steps is 44 640 points; Prometheus refuses anything over
 // 11 000 with an error the reader cannot act on. Coarsening is the same chart
 // that width would show anyway.
